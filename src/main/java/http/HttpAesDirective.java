@@ -12,17 +12,23 @@ import akka.http.javadsl.model.StatusCodes;
 import akka.http.javadsl.server.*;
 import akka.stream.ActorMaterializer;
 import akka.stream.javadsl.Flow;
-import domain.Convenio.IntermediateRoutingServiceProvider;
-import domain.Convenio.IntermediateRoutingService;
-import domain.Convenio.entity.Compensacion;
-import domain.Convenio.entity.Pago;
-import domain.Convenio.entity.Respuesta;
-import servicios.dispatcher.DispatcherServiceProvider;
-import servicios.localizacion.LocalizacionServiceProvider;
-import servicios.transformacion.TransformationServiceProvider;
+import domain.disponibilidad.DisponibilidadService;
+import domain.disponibilidad.DisponibilidadServiceProvider;
+import domain.disponibilidad.commands.CancelarReserva;
+import domain.disponibilidad.commands.ConsultarDisponibilidad;
+import domain.disponibilidad.commands.ReservarServicio;
+import domain.disponibilidad.entity.Datos;
+import domain.disponibilidad.entity.RespuestaConsultaDisponibilidadConID;
+import domain.disponibilidad.entity.RespuestaOperacion;
+import domain.disponibilidad.entity.RespuestaConsultaDisponibilidad;
+import servicios.aviajar.AviajarService;
+import servicios.aviajar.AviajarServiceProvider;
+import servicios.datos.*;
+import util.JacksonJdk8;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.time.LocalDate;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 /**
@@ -31,11 +37,38 @@ import java.util.concurrent.CompletionStage;
 
 public class HttpAesDirective extends AllDirectives {
 
-    private final IntermediateRoutingService intermediateRouting = new IntermediateRoutingServiceProvider(
-            new LocalizacionServiceProvider(), new TransformationServiceProvider(), new DispatcherServiceProvider()
-    );
+    public static DisponibilidadService disponibilidadService;
+    public static AviajarService aviajarService = new AviajarServiceProvider();
+    public static String host = "localhost";
+    public static int port = 9090;
+
+    public static String hostAviajar = "localhost";
+    public static int portAviajar = 9090;
 
     public static void main(String[] args) throws Exception {
+
+        if (args.length > 2) {
+            Datos.FILE_PROVEEDOR = args[0];
+            hostAviajar = args[1];
+            portAviajar = Integer.parseInt(args[2]);
+        }
+
+        //host = getIp();
+
+        Datos.cargarDatos();
+        aviajarService.registrarProveedor(host, port);
+        PersistenciaService persistenciaService = null;
+        if (Datos.datos.getServicio().equals("aereo"))
+            persistenciaService = new aereoProvider();
+        else if (Datos.datos.getServicio().equals("terrestre"))
+            persistenciaService = new terrestreProvider();
+        else if (Datos.datos.getServicio().equals("alojamiento"))
+            persistenciaService = new alojamientoProvider();
+        else if (Datos.datos.getServicio().equals("paseo"))
+            persistenciaService = new paseosProvider();
+
+
+        disponibilidadService = new DisponibilidadServiceProvider(persistenciaService);
         ActorSystem system = ActorSystem.create("routes");
 
         final Http http = Http.get(system);
@@ -45,9 +78,9 @@ public class HttpAesDirective extends AllDirectives {
 
         final Flow<HttpRequest, HttpResponse, NotUsed> routeFlow = app.createRoute().flow(system, materializer);
         final CompletionStage<ServerBinding> binding = http.bindAndHandle(routeFlow,
-                ConnectHttp.toHost("localhost", 9090), materializer);
+                ConnectHttp.toHost(host, port), materializer);
 
-        System.out.println("Server online at http://localhost:9090/\nPress RETURN to stop...");
+        System.out.println("Server online at http://"+host+":"+port+"/\nPress RETURN to stop...");
         System.in.read();
 
         binding.thenCompose(ServerBinding::unbind)
@@ -57,38 +90,49 @@ public class HttpAesDirective extends AllDirectives {
     private Route createRoute() {
         return route(
                 pathPrefix("servicios", () ->
-                        pathPrefix("factura", () ->
+                        pathPrefix("disponibilidad", () ->
                                 route(
-                                        get(() -> route(path(idFactura -> handleConsultarFactura(idFactura)))),
-                                        put(() -> route(pathPrefix(facturaId -> route(
-                                                pathPrefix("pagar", () -> handlePagarFactura(null)),
-                                                pathPrefix("compensar", () -> handleCompensarPagoFactura(null))
-                                        ))))
-                                )
+                                        post(() ->
+                                                route(
+                                        path("consultar" , () -> entity(JacksonJdk8.unmarshaller(ConsultarDisponibilidad.class), consultarDisponibilidad -> handleConsultarDisponbilidad(consultarDisponibilidad))),
+                                        path("reservar" , () -> entity(JacksonJdk8.unmarshaller(ReservarServicio.class), reservarServicio -> handleReservarServicio(reservarServicio))),
+                                        pathPrefix(reservaID ->  route(path("cancelar", () -> handleCancelarReserva(reservaID)))))
+                                ))
                         )
                 )
         );
     }
 
-    private Route handleConsultarFactura(String idFactura) {
-        System.out.println(LocalDate.now() + ": handleConsultarFactura ");
-        CompletableFuture<Respuesta> response = intermediateRouting.consultarFactura(idFactura);
-        Respuesta respuesta = response.join();
-        return complete(StatusCodes.OK, respuesta, Jackson.<Respuesta>marshaller());
+    private Route handleConsultarDisponbilidad(ConsultarDisponibilidad consultarDisponibilidad) {
+        System.out.println(LocalDate.now() + ": handleConsultarDisponbilidad ");
+        RespuestaConsultaDisponibilidad respuesta = disponibilidadService.consultarDisponibilidad(consultarDisponibilidad);;
+        return complete(StatusCodes.OK, respuesta, Jackson.<RespuestaConsultaDisponibilidad>marshaller());
     }
 
-    private Route handlePagarFactura(Pago pago) {
-        System.out.println(LocalDate.now() + ": handlePagarFactura ");
-        CompletableFuture<Respuesta> response = intermediateRouting.pagoFactura(pago);
-        Respuesta respuesta = response.join();
-        return complete(StatusCodes.OK, respuesta, Jackson.<Respuesta>marshaller());
+    private Route handleReservarServicio(ReservarServicio reservarServicio) {
+        System.out.println(LocalDate.now() + ": handleReservarServicio ");
+        RespuestaConsultaDisponibilidadConID respuesta = disponibilidadService.reservarServicio(reservarServicio);
+        return complete(StatusCodes.OK, respuesta, Jackson.<RespuestaConsultaDisponibilidadConID>marshaller());
     }
 
-    private Route handleCompensarPagoFactura(Compensacion compensacion) {
-        System.out.println(LocalDate.now() + ": handleCompensarPagoFactura ");
-        CompletableFuture<Respuesta> response = intermediateRouting.compensarPagoFactura(compensacion);
-        Respuesta respuesta = response.join();
-        return complete(StatusCodes.OK, respuesta, Jackson.<Respuesta>marshaller());
+    private Route handleCancelarReserva(String reservaID) {
+        CancelarReserva cancelarReserva = new CancelarReserva();
+        cancelarReserva.setIdReserva(Integer.parseInt(reservaID));
+        System.out.println(LocalDate.now() + ": handleCancelarReserva ");
+        RespuestaOperacion respuesta = disponibilidadService.cancelarReserva(cancelarReserva);
+        return complete(StatusCodes.OK, respuesta, Jackson.<RespuestaOperacion>marshaller());
+    }
+
+    private static String getIp() {
+        InetAddress ip;
+        try {
+            ip = InetAddress.getLocalHost();
+            System.out.println("Current IP address : " + ip.getHostAddress());
+            return  ip.getHostAddress();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+        }
+        return null;
     }
 
 }
